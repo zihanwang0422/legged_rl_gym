@@ -385,7 +385,7 @@ class Sim2SimController:
             
             while viewer.is_running():
                 if gamepad.exit_requested:
-                    print("\nExit request detected, ending simulation...")
+                    print("\nExit request detected, ending starget_posimulation...")
                     break
                 
                 # Get MuJoCo internal simulation time
