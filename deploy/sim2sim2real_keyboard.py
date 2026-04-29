@@ -25,6 +25,7 @@ import termios
 import tty
 import select
 import os
+from scipy.spatial.transform import Rotation as R
 
 # ========== 共享配置类 ==========
 class UnifiedConfig:
@@ -63,8 +64,35 @@ class UnifiedConfig:
     # PD 增益
     kp_stand = 60.0      # 站立阶段
     kd_stand = 2.0
-    kp_walk = 40.0       # 行走阶段
-    kd_walk = 2.0
+    kp_walk = 60.0       # 行走阶段
+    kd_walk = 1.0
+
+    # 关节限位 (训练顺序: FL, FR, RL, RR)
+    joint_limit_low = np.array([
+        -0.863, -0.686, -2.818,
+        -0.863, -0.686, -2.818,
+        -0.863, -0.686, -2.818,
+        -0.863, -0.686, -2.818,
+    ], dtype=np.float32)
+    joint_limit_high = np.array([
+        0.863,  4.501,  -0.888,
+        0.863,  4.501,  -0.888,
+        0.863,  4.501,  -0.888,
+        0.863,  4.501,  -0.888,
+    ], dtype=np.float32)
+    # 关节限位 (SDK 顺序: FR, FL, RR, RL)
+    joint_limit_low_sdk = np.array([
+        -0.863, -0.686, -2.818,
+        -0.863, -0.686, -2.818,
+        -0.863, -0.686, -2.818,
+        -0.863, -0.686, -2.818,
+    ], dtype=np.float32)
+    joint_limit_high_sdk = np.array([
+        0.863,  4.501,  -0.888,
+        0.863,  4.501,  -0.888,
+        0.863,  4.501,  -0.888,
+        0.863,  4.501,  -0.888,
+    ], dtype=np.float32)
     
     
     # 站立/稳定阶段时间
@@ -353,107 +381,124 @@ class Sim2SimController:
         """执行一步仿真"""
         self.mujoco.mj_step(self.model, self.data)
     
-    def run(self, keyboard):
-        """运行仿真循环"""
-        motiontime = 0
+    def run(self, gamepad):
+        """
+        Main simulation loop with Absolute Time Sync and Render Decimation.
+        """
+        motiontime = 0 # simulation step counter 
         
-        if self.headless:
-            # 无头模式
-            while True:
-                motiontime += 1
-                sim_time = motiontime * self.config.sim_dt
-                
-                if keyboard.exit_requested:
-                    print("\nExit request detected, ending simulation...")
+        # --- Time Synchronization Setup ---
+        sim_dt = self.model.opt.timestep  # Physics timestep (e.g., 0.005s)
+        target_render_fps = 50            # Human eye only needs 30-60 FPS
+        # Calculate how many physics steps to skip between renders
+        render_skip = int(1.0 / (target_render_fps * sim_dt))
+        if render_skip < 1: render_skip = 1
+        
+        # Launch viewer
+        with self.mujoco_viewer.launch_passive(self.model, self.data) as viewer:
+            # Initial Camera setup
+            viewer.cam.lookat[:] = self.data.qpos[:3]
+            viewer.cam.distance = 2.0
+            viewer.cam.azimuth = 90
+            viewer.cam.elevation = -20
+            
+            # --- Establish Absolute Time Reference ---
+            # Record start time immediately before entering the loop
+            start_time = time.time() 
+            
+            while viewer.is_running():
+                if gamepad.exit_requested:
+                    print("\nExit request detected, ending starget_posimulation...")
                     break
                 
-                self._control_step(sim_time, keyboard)
+                # Get MuJoCo internal simulation time
+                sim_time = self.data.time
+                
+                # --- Phase 1: Stand up (Linear Interpolation) ---
+                if sim_time <= self.config.standup_duration:
+                    rate = min(sim_time / self.config.standup_duration, 1.0)
+                    for i, qpos_addr in enumerate(self.joint_qpos_addrs):
+                        current_q = self.data.qpos[qpos_addr]
+                        self.qDes[i] = current_q * (1 - rate) + self.config.default_dof_pos[i] * rate
+                    self.send_command(self.qDes)
+                
+                # --- Phase 2: Stabilize at Default Pose ---
+                elif sim_time <= self.config.standup_duration + self.config.stabilize_duration:
+                    self.qDes = self.config.default_dof_pos.copy()
+                    self.send_command(self.qDes)
+                
+                # --- Phase 3: Neural Network Policy Control ---
+                else:
+                    # Safety check: Detect if robot is falling
+                    quat_wxyz = self.data.qpos[3:7].copy()
+                    quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]], dtype=np.float32)
+                    rpy = quat_to_euler_xyz(quat_xyzw)
+                    if abs(rpy[0]) > 0.8 or abs(rpy[1]) > 0.8:
+                        print(f"\nWarning at {sim_time:.2f}s: Robot tilted! roll={rpy[0]:.2f}, pitch={rpy[1]:.2f}")
+                    
+                    # Policy inference (decimated frequency)
+                    self.policy_counter += 1
+                    if self.policy_counter >= self.policy_decimation:
+                        self.policy_counter = 0
+                        
+                        # Get user input from keyboard
+                        cmd_vx, cmd_vy, cmd_vyaw = keyboard.get_velocity()
+                        commands = np.array([cmd_vx, cmd_vy, cmd_vyaw], dtype=np.float32)
+                        
+                        # Extract robot state
+                        base_ang_vel, projected_gravity, dof_pos, dof_vel = self.get_state()
+                        
+                        # Prepare observation for the policy
+                        obs = build_obs_45(base_ang_vel, projected_gravity, commands,
+                                           dof_pos, dof_vel, self.last_action, self.config)
+                        obs = normalize_obs(obs, self.config.clip_observations)
+                        obs_batch = obs[np.newaxis, :].astype(np.float32)
+                        
+                        # Forward pass through the neural network
+                        with torch.no_grad():
+                            obs_tensor = torch.from_numpy(obs_batch)
+                            action_tensor = self.policy(obs_tensor)
+                            if isinstance(action_tensor, tuple):
+                                action_tensor = action_tensor[0]
+                            action = action_tensor.cpu().numpy().flatten().astype(np.float32)
+                        
+                        # Scale action to joint targets
+                        action = np.clip(action, -self.config.clip_actions, self.config.clip_actions)
+                        self.last_action = action[:12].copy()
+                        self.qDes = action[:12] * self.config.action_scale + self.config.default_dof_pos
+                        self.qDes = np.clip(self.qDes, self.config.joint_limit_low, self.config.joint_limit_high)
+        
+                    self.send_command(self.qDes)
+                
+                # --- Physics Step ---
                 self.step()
+                motiontime += 1 # 注意 这个要放在整个while循环的最后面，不能只放在policy控制的部分，因为standup和stabilize阶段也需要计数
                 
-                if motiontime % int(1.0 / self.config.sim_dt) == 0:
-                    print(f"Sim time: {sim_time:.1f}s, Base height: {self.data.qpos[2]:.3f}m")
-        else:
-            # 可视化模式
-            with self.mujoco_viewer.launch_passive(self.model, self.data) as viewer:
-                viewer.cam.lookat[:] = self.data.qpos[:3]
-                viewer.cam.distance = 2.0
-                viewer.cam.azimuth = 90
-                viewer.cam.elevation = -20
-                
-                while viewer.is_running():
-                    motiontime += 1
-                    sim_time = motiontime * self.config.sim_dt
-                    
-                    if keyboard.exit_requested:
-                        print("\nExit request detected, ending simulation...")
-                        break
-                    
-                    self._control_step(sim_time, keyboard)
-                    self.step()
-                    
+                # --- Visual Update (Render Decimation) ---
+                # Syncing every step is slow; sync at 50Hz for better performance
+                if motiontime % render_skip == 0:
                     viewer.cam.lookat[:] = self.data.qpos[:3]
                     viewer.sync()
+                
+                # --- Soft Real-time Synchronization (Absolute) ---
+                # Calculate the exact time we SHOULD be at
+                expected_real_time = start_time + (motiontime * sim_dt)
+                time_to_sleep = expected_real_time - time.time()
+                
+                if time_to_sleep > 0:
+                    time.sleep(time_to_sleep)
+                
+                # --- Status Telemetry (Original Format) ---
+                if motiontime % int(1.0 / self.config.sim_dt) == 0:
+                    real_time_now = time.time() - start_time
+                    actual_hz = motiontime / real_time_now if real_time_now > 0 else 0
                     
-                    if motiontime % int(1.0 / self.config.sim_dt) == 0:
-                        print(f"Sim time: {sim_time:.1f}s, Base height: {self.data.qpos[2]:.3f}m")
-    
-    def _control_step(self, sim_time, keyboard):
-        """单步控制逻辑"""
-        # Phase 1: Stand up
-        if sim_time <= self.config.standup_duration:
-            rate = min(sim_time / self.config.standup_duration, 1.0)
-            for i, qpos_addr in enumerate(self.joint_qpos_addrs):
-                current_q = self.data.qpos[qpos_addr]
-                self.qDes[i] = current_q * (1 - rate) + self.config.default_dof_pos[i] * rate
-            self.send_command(self.qDes)
-        
-        # Phase 2: Stabilize
-        elif sim_time <= self.config.standup_duration + self.config.stabilize_duration:
-            self.qDes = self.config.default_dof_pos.copy()
-            self.send_command(self.qDes)
-        
-        # Phase 3: Policy control
-        else:
-            # Check tilt
-            quat_wxyz = self.data.qpos[3:7].copy()
-            quat_xyzw = np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
-            rpy = quat_to_euler_xyz(quat_xyzw)
-            if abs(rpy[0]) > 0.8 or abs(rpy[1]) > 0.8:
-                print(f"\nWarning at {sim_time:.2f}s: Robot tilted! roll={rpy[0]:.2f}, pitch={rpy[1]:.2f}")
-            
-            # Policy inference
-            self.policy_counter += 1
-            if self.policy_counter >= self.policy_decimation:
-                self.policy_counter = 0
-                
-                # Get commands
-                cmd_vx, cmd_vy, cmd_vyaw = keyboard.get_velocity()
-                commands = np.array([cmd_vx, cmd_vy, cmd_vyaw], dtype=np.float32)
-                
-                # Get state
-                base_ang_vel, projected_gravity, dof_pos, dof_vel = self.get_state()
-                
-                # Build observation
-                obs = build_obs_45(base_ang_vel, projected_gravity, commands, 
-                                 dof_pos, dof_vel, self.last_action, self.config)
-                obs = normalize_obs(obs, self.config.clip_observations)
-                obs_batch = obs[np.newaxis, :].astype(np.float32)
-                
-                # Policy inference
-                with torch.no_grad():
-                    obs_tensor = torch.from_numpy(obs_batch)
-                    action_tensor = self.policy(obs_tensor)
-                    if isinstance(action_tensor, tuple):
-                        action_tensor = action_tensor[0]
-                    action = action_tensor.cpu().numpy().flatten().astype(np.float32)
-                
-                # Scale action
-                action = np.clip(action, -self.config.clip_actions, self.config.clip_actions)
-                self.last_action = action[:12].copy()
-                
-                self.qDes = action[:12] * self.config.action_scale + self.config.default_dof_pos
-            
-            self.send_command(self.qDes)
+                    vx_cur, vy_cur, vyaw_cur = keyboard.get_velocity()
+                    
+                    print(f"[Keyboard] vx={vx_cur:+.2f} m/s | vy={vy_cur:+.2f} | yaw={vyaw_cur:+.2f} rad/s")
+                    print(f"[Sim Time]: t={self.data.time:.1f}s, Base height: {self.data.qpos[2]:.3f}m")
+                    print(f"[Real Time]: t={real_time_now:.1f}s, Actual Hz: {actual_hz:.2f} Hz")
+
 
 
 # ========== Sim2Real (Unitree SDK) 控制器 ==========
@@ -801,11 +846,11 @@ if __name__ == '__main__':
         print("Mode: Sim2Sim (MuJoCo)")
         
         # 路径设置
-        assets_dir = '/home/wzh/amp/isaacgym/AMP_for_hardware/deploy/assets/go1'
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        assets_dir = os.path.join(script_dir, 'assets', 'go1')
         xml_path = os.path.join(assets_dir, args.xml)
         
-        policy_dir = '/home/wzh/amp/isaacgym/AMP_for_hardware/deploy/exported_policy/go1'
-        policy_path = os.path.join(policy_dir, args.model)
+        policy_path = os.path.join(script_dir, args.model)
         
         controller = Sim2SimController(config, xml_path, policy_path, args.headless)
         controller.run(keyboard)
@@ -814,8 +859,8 @@ if __name__ == '__main__':
         print("Mode: Sim2Real (Unitree SDK)")
         
         # 路径设置
-        policy_dir = '/home/wzh/amp/isaacgym/AMP_for_hardware/deploy/exported_policy/go1'
-        policy_path = os.path.join(policy_dir, args.model)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        policy_path = os.path.join(script_dir, args.model)
         
         controller = Sim2RealController(config, policy_path)
         controller.run(keyboard)

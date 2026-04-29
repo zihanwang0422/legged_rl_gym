@@ -181,7 +181,7 @@ Validate the policy in MuJoCo before deploying to hardware, testing behavioral c
 cd deploy/
 
 # Keyboard control
-python sim2sim2real_keyboard.py --mode sim --model exported_policy/go1/policy.pt
+python sim2sim2real_keyboard.py --mode sim --model exported_policy/go1/policy_45_continus.pt
 
 # Joystick control
 python sim2sim2real_joystick.py --mode sim --model exported_policy/go1/policy.pt

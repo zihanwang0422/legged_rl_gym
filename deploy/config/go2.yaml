@@ -1,0 +1,61 @@
+# ========== Paths ==========
+policy_path: "../deploy/exported_policy/go2"
+xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/scene.xml"
+
+# ========== Time parameters ==========
+simulation_duration: 60.0
+sim_dt: 0.005          # simulation/control timestep (200Hz)
+policy_hz: 33          # policy inference frequency (Hz)
+control_decimation: 6  # sim_dt * control_decimation = policy_dt (0.03s)
+
+# ========== PD gains ==========
+kp_stand: 60.0
+kd_stand: 2.0
+kp_walk: 60.0
+kd_walk: 1.0
+
+# ========== Default standing angles (training order: FL, FR, RL, RR) ==========
+default_dof_pos: [0.0, 0.9, -1.8,   # FL (hip, thigh, calf)
+                  0.0, 0.9, -1.8,   # FR
+                  0.0, 0.9, -1.8,   # RL
+                  0.0, 0.9, -1.8]   # RR
+
+# ========== Observation scales ==========
+obs_scales:
+  lin_vel: 2.0
+  ang_vel: 0.25
+  dof_pos: 1.0
+  dof_vel: 0.05
+  commands: [2.0, 2.0, 0.25]  # [lin_vel_x, lin_vel_y, ang_vel_yaw]
+
+# ========== Action scale ==========
+action_scale: 0.25
+
+# ========== Stand / stabilize durations ==========
+standup_duration: 2.0      # standup duration (s)
+stabilize_duration: 0.5    # stabilize duration (s)
+
+# ========== Command velocity ranges ==========
+vx_range: [0.0, 1.17]       # m/s (forward only, no backward)
+vy_range: [-0.3, 0.3]       # m/s
+vyaw_range: [-1.57, 1.57]   # rad/s
+
+# ========== Sim2Real configuration ==========
+robot_ip: "192.168.123.10"
+robot_port: 8007
+local_port: 8080
+
+# ========== Joint ordering configuration ==========
+# Joint name suffixes (MuJoCo joint name = leg_prefix + joint_suffix)
+joint_suffixes: ['hip', 'thigh', 'calf']  # per-leg joint sequence
+leg_order: ['FL', 'FR', 'RL', 'RR']       # leg order used in training
+
+# SDK joint order (Unitree SDK)
+sdk_joint_order: ['FR_0', 'FR_1', 'FR_2',
+                  'FL_0', 'FL_1', 'FL_2',
+                  'RR_0', 'RR_1', 'RR_2',
+                  'RL_0', 'RL_1', 'RL_2']
+
+# Joint mapping: train order (FL, FR, RL, RR) -> SDK order (FR, FL, RR, RL)
+train_to_sdk_map: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+sdk_to_train_map: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]

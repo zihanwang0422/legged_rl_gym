@@ -11,7 +11,7 @@ control_decimation: 6  # sim_dt * control_decimation = policy_dt (0.03s)
 # ========== PD gains ==========
 kp_stand: 60.0
 kd_stand: 2.0
-kp_walk: 60.0
+kp_walk: 80.0
 kd_walk: 1.0
 
 # ========== Default standing angles (training order: FL, FR, RL, RR) ==========
