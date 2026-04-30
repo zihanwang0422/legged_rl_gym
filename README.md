@@ -162,6 +162,8 @@ python legged_gym/scripts/train.py --task=a1_amp --headless
 
 ```bash
 python legged_gym/scripts/play.py --task=go1_amp
+
+python legged_gym/scripts/play.py --task=go2_amp
 ```
 
 Loads the latest model by default. Set `load_run` and `checkpoint` in the config to specify a version.
