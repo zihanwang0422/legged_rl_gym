@@ -25,93 +25,80 @@ import termios
 import tty
 import select
 import os
+import yaml
 from scipy.spatial.transform import Rotation as R
 
-# ========== 共享配置类 ==========
-class UnifiedConfig:
-    """统一配置参数 (sim 和 real 共享)"""
-    
-    # 控制频率
-    sim_dt = 0.005       # 仿真/控制时间步长 (500Hz)
-    policy_hz = 33       # 策略推理频率 (Hz)
-    policy_dt = 1.0 / policy_hz
-    
-    # 默认站立角度 (训练环境顺序: FL, FR, RL, RR)
-    # ⚠️ 注意：这个需要和训练环境的 default_joint_angles 完全一致！
-    default_dof_pos = np.array([
-        0.0, 0.9, -1.8,   # FL (hip, thigh, calf)
-        0.0, 0.9, -1.8,   # FR
-        0.0, 0.9, -1.8,   # RL
-        0.0, 0.9, -1.8    # RR
-    ], dtype=np.float32)
-    
-    # 观测缩放因子 (与训练环境一致)
-    obs_scales = {
-        'lin_vel': 2.0,
-        'ang_vel': 0.25,
-        'dof_pos': 1.0,
-        'dof_vel': 0.05,
-        'commands': np.array([2.0, 2.0, 0.25], dtype=np.float32),  # [lin_vel_x, lin_vel_y, ang_vel_yaw]
-    }
-    
-    # 动作缩放
-    action_scale = 0.25
-    
-    # 观测/动作裁剪
-    clip_observations = 100.0
-    clip_actions = 100.0
-    
-    # PD 增益
-    kp_stand = 60.0      # 站立阶段
-    kd_stand = 2.0
-    kp_walk = 60.0       # 行走阶段
-    kd_walk = 1.0
+# ========== Config loader ==========
 
-    # 关节限位 (训练顺序: FL, FR, RL, RR)
-    joint_limit_low = np.array([
-        -0.863, -0.686, -2.818,
-        -0.863, -0.686, -2.818,
-        -0.863, -0.686, -2.818,
-        -0.863, -0.686, -2.818,
-    ], dtype=np.float32)
-    joint_limit_high = np.array([
-        0.863,  4.501,  -0.888,
-        0.863,  4.501,  -0.888,
-        0.863,  4.501,  -0.888,
-        0.863,  4.501,  -0.888,
-    ], dtype=np.float32)
-    # 关节限位 (SDK 顺序: FR, FL, RR, RL)
-    joint_limit_low_sdk = np.array([
-        -0.863, -0.686, -2.818,
-        -0.863, -0.686, -2.818,
-        -0.863, -0.686, -2.818,
-        -0.863, -0.686, -2.818,
-    ], dtype=np.float32)
-    joint_limit_high_sdk = np.array([
-        0.863,  4.501,  -0.888,
-        0.863,  4.501,  -0.888,
-        0.863,  4.501,  -0.888,
-        0.863,  4.501,  -0.888,
-    ], dtype=np.float32)
-    
-    
-    # 站立/稳定阶段时间
-    standup_duration = 2.0     # 站立阶段 (秒)
-    stabilize_duration = 0.5   # 稳定阶段 (秒)
-    
-    # 速度命令范围
-    vx_range = (-1.0, 2.0)      # m/s
-    vy_range = (-0.3, 0.3)      # m/s
-    vyaw_range = (-1.57, 1.57)  # rad/s
-    
-    # Sim2Real 特定配置
-    robot_ip = "192.168.123.10"
-    robot_port = 8007
-    local_port = 8080
-    
-    # 关节映射：训练环境顺序 (FL, FR, RL, RR) -> SDK 顺序 (FR, FL, RR, RL)
-    train_to_sdk_map = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
-    sdk_to_train_map = [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+def load_config(config_path):
+    """Load deployment configuration from a YAML file."""
+    with open(config_path, 'r') as f:
+        cfg = yaml.safe_load(f)
+
+    script_dir = os.path.dirname(os.path.abspath(config_path))
+    legged_gym_root = os.path.abspath(os.path.join(script_dir, '..'))
+
+    def resolve(p):
+        p = p.replace('{LEGGED_GYM_ROOT_DIR}', legged_gym_root)
+        return p if os.path.isabs(p) else os.path.join(script_dir, p)
+
+    class Config:
+        pass
+
+    c = Config()
+
+    c.sim_dt          = float(cfg['sim_dt'])
+    c.policy_hz       = float(cfg['policy_hz'])
+    c.policy_dt       = 1.0 / c.policy_hz
+
+    c.kp_stand        = float(cfg['kp_stand'])
+    c.kd_stand        = float(cfg['kd_stand'])
+    c.kp_walk         = float(cfg['kp_walk'])
+    c.kd_walk         = float(cfg['kd_walk'])
+
+    c.default_dof_pos = np.array(cfg['default_dof_pos'], dtype=np.float32)
+
+    scales = cfg['obs_scales']
+    c.obs_scales = {
+        'lin_vel':  float(scales['lin_vel']),
+        'ang_vel':  float(scales['ang_vel']),
+        'dof_pos':  float(scales['dof_pos']),
+        'dof_vel':  float(scales['dof_vel']),
+        'commands': np.array(scales['commands'], dtype=np.float32),
+    }
+
+    c.action_scale       = float(cfg['action_scale'])
+    c.clip_observations  = float(cfg.get('clip_observations', 100.0))
+    c.clip_actions       = float(cfg.get('clip_actions', 100.0))
+
+    c.standup_duration   = float(cfg['standup_duration'])
+    c.stabilize_duration = float(cfg['stabilize_duration'])
+
+    c.vx_range   = tuple(cfg['vx_range'])
+    c.vy_range   = tuple(cfg['vy_range'])
+    c.vyaw_range = tuple(cfg['vyaw_range'])
+
+    c.robot_ip   = cfg.get('robot_ip', '192.168.123.10')
+    c.robot_port = cfg.get('robot_port', 8007)
+    c.local_port = cfg.get('local_port', 8080)
+
+    c.train_to_sdk_map = cfg['train_to_sdk_map']
+    c.sdk_to_train_map = cfg['sdk_to_train_map']
+    c.leg_order        = cfg['leg_order']
+    c.joint_suffixes   = cfg['joint_suffixes']
+
+    c.joint_limit_low  = np.array(cfg['joint_limit_low'],  dtype=np.float32)
+    c.joint_limit_high = np.array(cfg['joint_limit_high'], dtype=np.float32)
+    # SDK limits default to same as training limits (mapping handles reorder)
+    c.joint_limit_low_sdk  = np.array(
+        cfg.get('joint_limit_low_sdk',  cfg['joint_limit_low']),  dtype=np.float32)
+    c.joint_limit_high_sdk = np.array(
+        cfg.get('joint_limit_high_sdk', cfg['joint_limit_high']), dtype=np.float32)
+
+    c.xml_path    = resolve(cfg['xml_path'])
+    c.policy_path = resolve(cfg['policy_path'])
+
+    return c
 
 
 # ========== 辅助函数 ==========
@@ -290,24 +277,17 @@ class KeyboardController:
 class Sim2SimController:
     """MuJoCo 仿真控制器"""
     
-    # MuJoCo 模型中的关节和执行器名称 (FL, FR, RL, RR 顺序)
-    JOINT_NAMES = [
-        'FL_hip_joint', 'FL_thigh_joint', 'FL_calf_joint',
-        'FR_hip_joint', 'FR_thigh_joint', 'FR_calf_joint',
-        'RL_hip_joint', 'RL_thigh_joint', 'RL_calf_joint',
-        'RR_hip_joint', 'RR_thigh_joint', 'RR_calf_joint',
-    ]
-    
-    ACTUATOR_NAMES = [
-        'FL_hip', 'FL_thigh', 'FL_calf',
-        'FR_hip', 'FR_thigh', 'FR_calf',
-        'RL_hip', 'RL_thigh', 'RL_calf',
-        'RR_hip', 'RR_thigh', 'RR_calf',
-    ]
-    
     def __init__(self, config, xml_path, policy_path, headless=False):
         self.config = config
         self.headless = headless
+
+        # 从 config 动态生成关节和执行器名称
+        self.joint_names = []
+        self.actuator_names = []
+        for leg in config.leg_order:
+            for suffix in config.joint_suffixes:
+                self.joint_names.append(f'{leg}_{suffix}_joint')
+                self.actuator_names.append(f'{leg}_{suffix}')
         
         # 加载 MuJoCo 模型
         import mujoco
@@ -325,7 +305,7 @@ class Sim2SimController:
         self.joint_dof_addrs = []
         self.actuator_ids = []
         
-        for joint_name, actuator_name in zip(self.JOINT_NAMES, self.ACTUATOR_NAMES):
+        for joint_name, actuator_name in zip(self.joint_names, self.actuator_names):
             joint_id = self.model.joint(joint_name).id
             qpos_addr = self.model.jnt_qposadr[joint_id]
             dof_addr = self.model.jnt_dofadr[joint_id]
@@ -354,7 +334,11 @@ class Sim2SimController:
         self.data.qpos[2] = 0.27  # 初始高度
         mujoco.mj_forward(self.model, self.data)
         
-        print(f"Sim2Sim controller initialized")
+        # 检测 actuator 类型：biastype==1 表示位置伺服（GO1），否则为纯力矩电机（GO2）
+        first_id = self.actuator_ids[0]
+        self._is_position_servo = (int(self.model.actuator_biastype[first_id]) == 1)
+        
+        print(f"Sim2Sim controller initialized (actuator: {'position_servo' if self._is_position_servo else 'torque'})")
     
     def get_state(self):
         """获取当前状态"""
@@ -372,10 +356,30 @@ class Sim2SimController:
         
         return base_ang_vel, projected_gravity, dof_pos, dof_vel
     
-    def send_command(self, target_pos):
-        """发送控制命令"""
-        for i, actuator_id in enumerate(self.actuator_ids):
-            self.data.ctrl[actuator_id] = target_pos[i]
+    def send_command(self, target_pos, kp=0.0, kd=0.0):
+        """发送控制命令
+
+        方案 A（当前启用）：位置伺服型 XML（scene_pos.xml，GO2/GO1 均适用）
+          - XML 内部已设 kp=25 kv=0.5，Python 直接写入目标关节角即可
+          - 适合快速切换，行为与 IsaacGym 训练完全一致
+
+        方案 B（注释掉）：纯力矩电机 XML（scene.xml 原版 GO2）
+          - Python 端计算 PD 力矩：torque = kp*(target-q) - kd*dq
+          - 需要在 go2.yaml 中把 xml_path 改回 scene.xml 并取消下方注释
+        """
+        if self._is_position_servo:
+            # ── 方案 A：位置伺服，直接发目标角 ──────────────────────────────
+            for i, actuator_id in enumerate(self.actuator_ids):
+                self.data.ctrl[actuator_id] = target_pos[i]
+        else:
+            # ── 方案 B：力矩电机，Python 端 PD 计算 ──────────────────────────
+            for i, (actuator_id, qpos_addr, dof_addr) in enumerate(
+                zip(self.actuator_ids, self.joint_qpos_addrs, self.joint_dof_addrs)
+            ):
+                q = self.data.qpos[qpos_addr]
+                dq = self.data.qvel[dof_addr]
+                torque = kp * (target_pos[i] - q) - kd * dq
+                self.data.ctrl[actuator_id] = torque
     
     def step(self):
         """执行一步仿真"""
@@ -420,12 +424,12 @@ class Sim2SimController:
                     for i, qpos_addr in enumerate(self.joint_qpos_addrs):
                         current_q = self.data.qpos[qpos_addr]
                         self.qDes[i] = current_q * (1 - rate) + self.config.default_dof_pos[i] * rate
-                    self.send_command(self.qDes)
+                    self.send_command(self.qDes, self.config.kp_stand, self.config.kd_stand)
                 
                 # --- Phase 2: Stabilize at Default Pose ---
                 elif sim_time <= self.config.standup_duration + self.config.stabilize_duration:
                     self.qDes = self.config.default_dof_pos.copy()
-                    self.send_command(self.qDes)
+                    self.send_command(self.qDes, self.config.kp_stand, self.config.kd_stand)
                 
                 # --- Phase 3: Neural Network Policy Control ---
                 else:
@@ -468,7 +472,7 @@ class Sim2SimController:
                         self.qDes = action[:12] * self.config.action_scale + self.config.default_dof_pos
                         self.qDes = np.clip(self.qDes, self.config.joint_limit_low, self.config.joint_limit_high)
         
-                    self.send_command(self.qDes)
+                    self.send_command(self.qDes, self.config.kp_walk, self.config.kd_walk)
                 
                 # --- Physics Step ---
                 self.step()
@@ -812,17 +816,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Unified Sim2Sim/Sim2Real Controller')
     parser.add_argument('--mode', type=str, default='sim', choices=['sim', 'real'],
                        help='Control mode: sim (MuJoCo) or real (Unitree SDK)')
-    parser.add_argument('--model', type=str, default='policy_45_continus.pt',
-                       help='PyTorch JIT model file (.pt)')
-    parser.add_argument('--xml', type=str, default='scene.xml',
-                       help='MuJoCo XML model file (sim mode only)')
+    parser.add_argument('--model', type=str, default=None,
+                       help='Override policy filename inside config policy_path directory (e.g. policy.pt)')
+    parser.add_argument('--config', type=str, default='config/go1.yaml',
+                       help='YAML config file relative to this script (e.g. config/go1.yaml, config/go2.yaml)')
     parser.add_argument('--headless', action='store_true',
                        help='Run without visualization (sim mode only)')
     args = parser.parse_args()
-    
-    # 创建统一配置
-    config = UnifiedConfig()
-    
+
+    # Resolve config path relative to this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = args.config if os.path.isabs(args.config) else os.path.join(script_dir, args.config)
+    config = load_config(config_path)
+    print(f"Loaded config: {config_path}")
+
     # 创建键盘控制器
     keyboard = KeyboardController(
         vx_range=config.vx_range,
@@ -830,9 +837,9 @@ if __name__ == '__main__':
         vyaw_range=config.vyaw_range
     )
     keyboard.start()
-    
+
     print("\n" + "="*70)
-    print("🎮 Keyboard Control Commands")
+    print("Keyboard Control Commands")
     print("="*70)
     print("  Forward/Backward: I/K or Numpad 8/2  (step: 0.1 m/s)")
     print("  Strafe Left/Right: U/O or Numpad 7/9  (step: 0.05 m/s)")
@@ -840,31 +847,27 @@ if __name__ == '__main__':
     print("  Emergency Stop: Space or Numpad 5")
     print("  Exit: Q or ESC")
     print("="*70 + "\n")
-    
+
     # 根据模式创建控制器
     if args.mode == 'sim':
         print("Mode: Sim2Sim (MuJoCo)")
-        
-        # 路径设置
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        assets_dir = os.path.join(script_dir, 'assets', 'go1')
-        xml_path = os.path.join(assets_dir, args.xml)
-        
-        policy_path = os.path.join(script_dir, args.model)
-        
-        controller = Sim2SimController(config, xml_path, policy_path, args.headless)
+        xml_path    = config.xml_path
+        if args.model:
+            policy_path = os.path.join(os.path.dirname(config.policy_path), args.model)
+        else:
+            policy_path = config.policy_path
+        controller  = Sim2SimController(config, xml_path, policy_path, args.headless)
         controller.run(keyboard)
-        
-    else:  # args.mode == 'real'
+
+    else:  # real
         print("Mode: Sim2Real (Unitree SDK)")
-        
-        # 路径设置
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        policy_path = os.path.join(script_dir, args.model)
-        
-        controller = Sim2RealController(config, policy_path)
+        if args.model:
+            policy_path = os.path.join(os.path.dirname(config.policy_path), args.model)
+        else:
+            policy_path = config.policy_path
+        controller  = Sim2RealController(config, policy_path)
         controller.run(keyboard)
-    
+
     # 停止键盘控制器
     keyboard.stop()
     print("\nProgram ended.")

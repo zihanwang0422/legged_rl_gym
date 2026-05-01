@@ -15,6 +15,8 @@
 - [Sim2Real（真机部署）](#sim2real真机部署)
 - [AMP 算法解读](#amp-算法解读)
 - [参考数据格式](#参考数据格式)
+- [MoCap 动作适配（Retargeting）](#mocap-动作适配retargeting)
+- [MoCap 验证与可视化](#mocap-验证与可视化)
 - [观测与动作空间](#观测与动作空间)
 - [常见问题](#常见问题)
 
@@ -72,14 +74,19 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 ```
 legged_rl_gym/
 ├── datasets/
-│   ├── mocap_motions/          # 参考动作数据（JSON 格式，供 AMP 判别器使用）
+│   ├── mocap_motions/          # 原始 A1 参考动作数据（JSON 格式）
 │   │   ├── trot0.txt           # 小跑步态 0
 │   │   ├── trot1.txt           # 小跑步态 1
-│   │   ├── pace0.txt           # 溜步步态
+│   │   ├── pace0.txt           # 溥步步态
 │   │   ├── leftturn0.txt       # 左转
 │   │   └── rightturn0.txt      # 右转
-│   └── hopturn/
-│       └── hopturn.txt         # 跳跃转弯
+│   ├── hopturn/
+│   │   └── hopturn.txt         # 跳跃转弯
+│   ├── mocap_go1/              # GO1 适配后的动作数据（自动生成）
+│   ├── mocap_go2/              # GO2 适配后的动作数据（自动生成）
+│   ├── retarget_mocap.py       # 动作适配工具（A1 → GO1/GO2）
+│   ├── verify_mocap.py         # 静态几何验证脚本
+│   └── replay_mocap.py         # Isaac Gym 动作回放（无需策略）
 │
 ├── legged_gym/
 │   ├── envs/
@@ -336,6 +343,66 @@ joint_pos(12) + toe_pos_local(12) + linear_vel(3) + angular_vel(3) + joint_vel(1
 ```
 
 判别器输入为相邻两帧拼接：$(s_t, s_{t+1})$ = **84 维**。
+
+---
+
+## MoCap 动作适配（Retargeting）
+
+当参考动作数据来自不同机器人（如用 A1 的 mocap 训练 GO1/GO2）时，需要根据目标机器人的肢体比例进行适配。`datasets/retarget_mocap.py` 采用正运动学（FK）方法实现自动适配：
+
+```bash
+# 将 A1 动作适配为 GO2 尺寸
+python datasets/retarget_mocap.py --src a1 --tgt go2
+
+# 将 A1 动作适配为 GO1 尺寸
+python datasets/retarget_mocap.py --src a1 --tgt go1
+```
+
+适配结果分别输出到 `datasets/mocap_go2/` 和 `datasets/mocap_go1/` 目录。
+
+**适配算法：**
+- `root_z`（躲干高度）按肢体长度比例缩放
+- 足端位置根据目标机器人运动学参数通过 FK 重新计算
+- 根节点线速度按相同比例缩放
+- 关节角度保持不变（无量纲）
+
+| 机器人 | 大腿长 | 小腿长 | 肢体总长 | 相对 A1 缩放 |
+|--------|--------|--------|----------|----------|
+| A1     | 0.200 m | 0.200 m | 0.400 m | 1.000× |
+| GO1    | 0.213 m | 0.213 m | 0.426 m | 1.065× |
+| GO2    | 0.213 m | 0.213 m | 0.426 m | 1.065× |
+
+适配完成后，需更新对应机器人 AMP 配置中的 `MOTION_FILES`：
+
+```python
+# legged_gym/envs/go2/go2_amp_config.py
+MOTION_FILES = glob.glob('datasets/mocap_go2/*')
+```
+
+---
+
+## MoCap 验证与可视化
+
+### 静态几何验证（无需 GPU）
+
+```bash
+python datasets/verify_mocap.py --dir datasets/mocap_go2 --robot go2 --plot
+```
+
+逐文件检查：帧维度（61 维）、`root_z` 范围、足端 FK 接触高度、关节角度限位、四元数归一化、速度量级。每个文件输出通过/失败汇总，`--plot` 参数额外保存图表到 `datasets/verify_<robot>.png`。
+
+### Isaac Gym 动作回放
+
+在 Isaac Gym 中直接回放适配后的动作数据（无需加载任何训练策略）：
+
+```bash
+python datasets/replay_mocap.py --task go2_amp --speed 0.3
+```
+
+- 按顺序逐一播放所有动作文件
+- 逐帧设置机器人根节点状态和关节角度
+- `--speed`：播放速度倍率（默认 `1.0`，`0.3` = 30% 速度便于观察）
+- 可直观确认适配后的动作在目标机器人上是否自然合理
 
 ---
 

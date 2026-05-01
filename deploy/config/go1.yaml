@@ -1,6 +1,6 @@
 # ========== Paths ==========
-policy_path: "../deploy/exported_policy/go1"
-xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/go1/scene.xml"
+policy_path: "../exported_policy/go1/policy_45_continus.pt"
+xml_path: "../assets/go1/scene.xml"
 
 # ========== Time parameters ==========
 simulation_duration: 60.0
@@ -59,3 +59,17 @@ sdk_joint_order: ['FR_0', 'FR_1', 'FR_2',
 # Joint mapping: train order (FL, FR, RL, RR) -> SDK order (FR, FL, RR, RL)
 train_to_sdk_map: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
 sdk_to_train_map: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+
+# ========== Observation / action clipping ==========
+clip_observations: 100.0
+clip_actions: 100.0
+
+# ========== Joint limits (training order: FL, FR, RL, RR) ==========
+joint_limit_low:  [-0.863, -0.686, -2.818,
+                   -0.863, -0.686, -2.818,
+                   -0.863, -0.686, -2.818,
+                   -0.863, -0.686, -2.818]
+joint_limit_high: [ 0.863,  4.501, -0.888,
+                    0.863,  4.501, -0.888,
+                    0.863,  4.501, -0.888,
+                    0.863,  4.501, -0.888]

@@ -1,27 +1,11 @@
 # AMP for Hardware — Adversarial Motion Priors for Quadruped Locomotion
 
 Implementation of [Adversarial Motion Priors Make Good Substitutes for Complex Reward Functions](https://bit.ly/3hpvbD6).  
-Trains natural locomotion policies for quadruped robots using ~4.5 seconds of reference MoCap data, with full support for Isaac Gym training, Sim-to-Sim validation (MuJoCo), and Sim-to-Real deployment on Unitree Go1 / A1.
+Trains natural locomotion policies for quadruped robots using ~4.5 seconds of reference MoCap data, with full support for Isaac Gym training, Sim-to-Sim validation (MuJoCo), and Sim-to-Real deployment on Unitree Go1 / Go2.
 
 > **中文文档**: [README_CN.md](README_CN.md)
 
 ---
-
-## Table of Contents
-
-- [Installation](#installation)
-- [Project Structure](#project-structure)
-- [Training](#training)
-- [Play](#play)
-- [Sim-to-Sim (MuJoCo Validation)](#sim-to-sim-mujoco-validation)
-- [Sim-to-Real (Hardware Deployment)](#sim-to-real-hardware-deployment)
-- [AMP Algorithm Overview](#amp-algorithm-overview)
-- [Reference Motion Data Format](#reference-motion-data-format)
-- [Observation & Action Space](#observation--action-space)
-- [Troubleshooting](#troubleshooting)
-
----
-
 ## Installation
 
 ### 1. Create Conda Environment
@@ -74,14 +58,19 @@ export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 ```
 legged_rl_gym/
 ├── datasets/
-│   ├── mocap_motions/          # Reference motion files (JSON) used by the AMP discriminator
+│   ├── mocap_motions/          # Original A1 reference motion files (JSON)
 │   │   ├── trot0.txt           # Trotting gait 0
 │   │   ├── trot1.txt           # Trotting gait 1
 │   │   ├── pace0.txt           # Pacing gait
 │   │   ├── leftturn0.txt       # Left turn
 │   │   └── rightturn0.txt      # Right turn
-│   └── hopturn/
-│       └── hopturn.txt         # Hop-turn motion
+│   ├── hopturn/
+│   │   └── hopturn.txt         # Hop-turn motion
+│   ├── mocap_go1/              # GO1-retargeted motion files (auto-generated)
+│   ├── mocap_go2/              # GO2-retargeted motion files (auto-generated)
+│   ├── retarget_mocap.py       # FK-based retargeting tool (A1 → GO1/GO2)
+│   ├── verify_mocap.py         # Static geometry verification script
+│   └── replay_mocap.py         # Isaac Gym mocap playback (no policy needed)
 │
 ├── legged_gym/
 │   ├── envs/
@@ -129,11 +118,95 @@ legged_rl_gym/
 
 ---
 
-## Training
+## Motion Data & Retargeting
+
+### Reference Motion File Format
+
+Files are in `datasets/mocap_motions/`, stored as JSON with a `.txt` extension.
+
+```json
+{
+  "LoopMode": "Wrap",
+  "FrameDuration": 0.021,
+  "EnableCycleOffsetPosition": true,
+  "EnableCycleOffsetRotation": true,
+  "MotionWeight": 0.5,
+  "Frames": [[frame_0_values...], [frame_1_values...]]
+}
+```
+
+**Per-frame layout (61 dims, PyBullet joint order)**
+
+| Field | Dims | Index | Description |
+|-------|------|-------|-------------|
+| `root_pos` | 3 | 0–2 | Root position (x, y, z) |
+| `root_rot` | 4 | 3–6 | Root rotation quaternion (x,y,z,w) |
+| `joint_pos` | 12 | 7–18 | Joint angles `[FR,FL,RR,RL]×3` |
+| `toe_pos_local` | 12 | 19–30 | Foot-end local positions |
+| `linear_vel` | 3 | 31–33 | Root linear velocity |
+| `angular_vel` | 3 | 34–36 | Root angular velocity |
+| `joint_vel` | 12 | 37–48 | Joint velocities |
+| `toe_vel_local` | 12 | 49–60 | Foot-end local velocities |
+
+> Raw data uses PyBullet order `[FR, FL, RR, RL]`. `AMPLoader.reorder_from_pybullet_to_isaac()` converts to Isaac Gym order `[FL, FR, RL, RR]` at load time.
+
+**AMP discriminator observations**: `AMPLoader` strips `root_pos` and `root_rot`, keeping:
+
+```
+joint_pos(12) + toe_pos_local(12) + linear_vel(3) + angular_vel(3) + joint_vel(12) = 42 dims
+```
+
+Discriminator input = two consecutive frames: $(s_t, s_{t+1})$ = **84 dims**.
+
+### Retargeting to a Different Robot
+
+When training GO1/GO2 with A1 mocap data, limb proportions must be rescaled. `datasets/retarget_mocap.py` performs FK-based retargeting:
 
 ```bash
-# Train Go1 AMP policy (recommended)
+# Retarget A1 mocap → GO2 (writes to datasets/mocap_go2/)
+python datasets/retarget_mocap.py --src a1 --tgt go2
+
+# Retarget A1 mocap → GO1 (writes to datasets/mocap_go1/)
+python datasets/retarget_mocap.py --src a1 --tgt go1
+```
+
+| Robot | Thigh | Calf | Total limb | Scale vs A1 |
+|-------|-------|------|------------|-------------|
+| A1    | 0.200 m | 0.200 m | 0.400 m | 1.000× |
+| GO1   | 0.213 m | 0.213 m | 0.426 m | 1.065× |
+| GO2   | 0.213 m | 0.213 m | 0.426 m | 1.065× |
+
+After retargeting, point the AMP config at the new directory:
+
+```python
+# legged_gym/envs/go2/go2_amp_config.py
+MOTION_FILES = glob.glob('datasets/mocap_go2/*')
+```
+
+### Verification & Visualization
+
+**Static geometry check** (no GPU needed):
+```bash
+python datasets/verify_mocap.py --dir datasets/mocap_go2 --robot go2 --plot
+```
+Checks per file: frame dimension, `root_z` range, foot FK height, joint limits, quaternion norm, velocity magnitudes. Saves a figure to `datasets/verify_go2.png`.
+
+**Isaac Gym playback** (replay data without any trained policy):
+```bash
+python datasets/replay_mocap.py --task go2_amp --speed 0.3
+```
+Iterates through all motion files, setting robot state frame-by-frame. Use `--speed 0.3` for slow-motion inspection.
+
+---
+
+## Train
+
+```bash
+# Train Go1 AMP policy
 python legged_gym/scripts/train.py --task=go1_amp --headless
+
+# Go2 AMP policy
+python legged_gym/scripts/train.py --task=go2_amp --headless
 
 # Train A1 AMP policy
 python legged_gym/scripts/train.py --task=a1_amp --headless
@@ -152,13 +225,9 @@ python legged_gym/scripts/train.py --task=a1_amp --headless
 | `--checkpoint <iter>` | Specify checkpoint number (`-1` = latest) |
 | `--sim_device cpu` | Use CPU simulation |
 
-**Tips:**
-- Press `V` after training starts to toggle rendering — disabling it greatly speeds up simulation.
-- Checkpoints are saved to: `logs/<experiment_name>/<date_time>_<run_name>/model_<iter>.pt`
-
 ---
 
-## Play
+## Play & Policy Export
 
 ```bash
 python legged_gym/scripts/play.py --task=go1_amp
@@ -166,27 +235,42 @@ python legged_gym/scripts/play.py --task=go1_amp
 python legged_gym/scripts/play.py --task=go2_amp
 ```
 
-Loads the latest model by default. Set `load_run` and `checkpoint` in the config to specify a version.
+Loads the latest checkpoint by default. Set `load_run` and `checkpoint` in the config to specify a version.
 
 Record a video:
 ```bash
 python legged_gym/scripts/record_policy.py --task=go1_amp
 ```
 
+**Exporting for deployment**: `play.py` automatically exports the policy to `deploy/exported_policy/<robot>/` via `torch.jit.script`. The exported `.pt` file runs without Isaac Gym dependencies and can be loaded directly by the deploy scripts.
+
+```bash
+# After play.py exits, the exported policy is at:
+# deploy/exported_policy/go2/policy.pt  (or policy_<iter>.pt)
+```
+
 ---
 
 ## Sim-to-Sim (MuJoCo Validation)
 
-Validate the policy in MuJoCo before deploying to hardware, testing behavioral consistency across physics engines:
+Validate the policy in MuJoCo before deploying to hardware, testing behavioral consistency across physics engines.
+
+All robot-specific parameters (xml path, policy path, joint names, default angles, gains, etc.) are read from the YAML config:
 
 ```bash
 cd deploy/
 
-# Keyboard control
-python sim2sim2real_keyboard.py --mode sim --model exported_policy/go1/policy_45_continus.pt
+# Go1 keyboard control
+python sim2sim2real_keyboard.py --mode sim --config config/go1.yaml
 
-# Joystick control
-python sim2sim2real_joystick.py --mode sim --model exported_policy/go1/policy.pt
+# Go2 keyboard control
+python sim2sim2real_keyboard.py --mode sim --config config/go2.yaml
+
+# Override policy file:
+python sim2sim2real_keyboard.py --mode sim --config config/go2.yaml --model policy.pt
+
+# Joystick (uses the same --config flag)
+python sim2sim2real_joystick.py --mode sim --config config/go2.yaml
 ```
 
 **Keyboard mapping:**
@@ -212,169 +296,25 @@ python sim2sim2real_joystick.py --mode sim --model exported_policy/go1/policy.pt
 ```bash
 cd deploy/
 
-# Keyboard control on hardware
-python sim2sim2real_keyboard.py --mode real --model exported_policy/go1/policy.pt
+# Go1 keyboard control on hardware
+python sim2sim2real_keyboard.py --mode real --config config/go1.yaml
 
-# Joystick control on hardware
-python sim2sim2real_joystick.py --mode real --model exported_policy/go1/policy.pt
+# Go2 keyboard control on hardware
+python sim2sim2real_keyboard.py --mode real --config config/go2.yaml
+
+# Joystick
+python sim2sim2real_joystick.py --mode real --config config/go2.yaml
 ```
 
-**Control parameters (`UnifiedConfig`):**
+**Key parameters** (set per-robot in `deploy/config/<robot>.yaml`):
 
-| Parameter | Value |
-|-----------|-------|
-| Control timestep | 5 ms (200 Hz) |
-| Policy inference rate | 33 Hz |
-| Action scale | 0.25 |
-| Observation clip | 100.0 |
-
-**Exporting a policy (Isaac Gym → TorchScript):**
-
-`play.py` exports the policy via `torch.jit.script` to `deploy/exported_policy/`. The exported file runs without Isaac Gym dependencies.
-
----
-
-## AMP Algorithm Overview
-
-### Core Idea
-
-AMP (Adversarial Motion Priors) trains a policy whose motion **style** matches reference MoCap data, while simultaneously tracking task objectives (velocity commands). The discriminator output **replaces** hand-crafted motion quality rewards.
-
-```
-Total Reward = α × AMP Style Reward  +  (1 − α) × Task Reward
-```
-
-`α` is controlled by `amp_task_reward_lerp` (default: 0.3 → 70% AMP + 30% task).
-
-### System Overview
-
-```
-┌───────────────────────────────────────────────────────┐
-│                     Training Loop                     │
-│                                                       │
-│  Isaac Gym Env ──→ AMP Observations (s_t, s_{t+1})   │
-│        ↓                       ↓                     │
-│  PPO Actor-Critic        Discriminator D(s, s')       │
-│        ↓                       ↓                     │
-│  Task reward r_task    Style reward r_AMP             │
-│         ↘                    ↙                        │
-│           Total reward → GAE → Policy update          │
-│                                                       │
-│  Expert replay buffer ──→ Discriminator supervision   │
-└───────────────────────────────────────────────────────┘
-```
-
-### Discriminator (`amp_discriminator.py`)
-
-- **Architecture**: MLP with hidden layers `[1024, 512]`, scalar output logit
-- **Input**: Concatenation of adjacent state frames $(s_t, s_{t+1})$, dimension = `observation_dim × 2`
-- **Training**: Distinguishes "expert (MoCap)" from "policy-generated" transitions using WGAN-style gradient penalty (`compute_grad_pen`)
-- **Style reward**:
-
-$$r_{AMP} = \text{coef} \times \max\!\left(0,\ 1 - \tfrac{1}{4}(D(s,s') - 1)^2\right)$$
-
-### Reference State Initialization (RSI)
-
-- `reference_state_initialization_prob = 0.85`: On each environment reset, 85% of episodes initialize from a randomly sampled MoCap frame rather than a fixed standing pose.
-- Purpose: Broadens phase-space coverage, accelerating convergence to natural gaits.
-
-### Key Hyperparameters
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `amp_reward_coef` | 2.0 | Style reward scaling factor |
-| `amp_task_reward_lerp` | 0.3 | Task reward interpolation weight |
-| `amp_discr_hidden_dims` | [1024, 512] | Discriminator hidden layers |
-| `amp_replay_buffer_size` | 1,000,000 | Policy-side replay buffer size |
-| `amp_num_preload_transitions` | 200,000 | Number of preloaded reference frames |
-| `entropy_coef` | 0.01 | Policy entropy regularization |
-
----
-
-## Reference Motion Data Format
-
-Files are located in `datasets/mocap_motions/`, stored as JSON with a `.txt` extension.
-
-### File Structure
-
-```json
-{
-  "LoopMode": "Wrap",
-  "FrameDuration": 0.021,
-  "EnableCycleOffsetPosition": true,
-  "EnableCycleOffsetRotation": true,
-  "MotionWeight": 0.5,
-  "Frames": [
-    [frame_0_values...],
-    [frame_1_values...]
-  ]
-}
-```
-
-- `FrameDuration`: Time between frames (seconds).
-- `MotionWeight`: Sampling weight when mixing multiple motion files.
-- `LoopMode: "Wrap"`: Motion loops continuously.
-
-### Per-Frame Layout (61 dims, PyBullet joint ordering)
-
-| Field | Dims | Index | Description |
-|-------|------|-------|-------------|
-| `root_pos` | 3 | 0–2 | Root position (x, y, z) |
-| `root_rot` | 4 | 3–6 | Root rotation quaternion (x,y,z,w) |
-| `joint_pos` | 12 | 7–18 | 12 joint angles [FR,FL,RR,RL]×3 |
-| `toe_pos_local` | 12 | 19–30 | 4 foot-end local positions |
-| `linear_vel` | 3 | 31–33 | Root linear velocity |
-| `angular_vel` | 3 | 34–36 | Root angular velocity |
-| `joint_vel` | 12 | 37–48 | 12 joint velocities |
-| `toe_vel_local` | 12 | 49–60 | 4 foot-end local velocities |
-
-> **Note**: Raw data uses PyBullet joint order `[FR, FL, RR, RL]`. `AMPLoader.reorder_from_pybullet_to_isaac()` automatically converts to Isaac Gym order `[FL, FR, RL, RR]`.
-
-### AMP Observations Used by the Discriminator
-
-`AMPLoader` strips `root_pos` and `root_rot`, keeping only:
-
-```
-joint_pos(12) + toe_pos_local(12) + linear_vel(3) + angular_vel(3) + joint_vel(12) = 42 dims
-```
-
-Discriminator input is two consecutive frames concatenated: $(s_t, s_{t+1})$ = **84 dims**.
-
----
-
-## Observation & Action Space
-
-### Policy Observations (Go1, 45 dims)
-
-| Index | Dims | Content | Scale |
-|-------|------|---------|-------|
-| 0–2 | 3 | Base angular velocity `base_ang_vel` (x,y,z) | × 0.25 |
-| 3–5 | 3 | Projected gravity vector | — |
-| 6–8 | 3 | Velocity commands `[lin_vel_x, lin_vel_y, ang_vel_yaw]` | × [2.0, 2.0, 0.25] |
-| 9–20 | 12 | Joint position offset `dof_pos − default_dof_pos` | × 1.0 |
-| 21–32 | 12 | Joint velocities `dof_vel` | × 0.05 |
-| 33–44 | 12 | Last actions | — |
-
-### Joint Order (Isaac Gym: FL → FR → RL → RR)
-
-| # | Joint | # | Joint |
-|---|-------|---|-------|
-| 1 | FL_hip_joint | 7 | RL_hip_joint |
-| 2 | FL_thigh_joint | 8 | RL_thigh_joint |
-| 3 | FL_calf_joint | 9 | RL_calf_joint |
-| 4 | FR_hip_joint | 10 | RR_hip_joint |
-| 5 | FR_thigh_joint | 11 | RR_thigh_joint |
-| 6 | FR_calf_joint | 12 | RR_calf_joint |
-
-### Actions (12 dims)
-
-Output is a residual on the default joint positions:
-
-```
-target_angle = action_scale × action + default_dof_pos
-```
-
-`action_scale = 0.25`, PD control: kp = 80 N·m/rad, kd = 1.0 N·m·s/rad.
+| Parameter | Description |
+|-----------|-------------|
+| `kp_walk` / `kd_walk` | PD gains during policy control |
+| `default_dof_pos` | Must match training config exactly |
+| `action_scale` | Must match training config exactly |
+| `xml_path` | MuJoCo scene file for Sim2Sim |
+| `policy_path` | Directory containing exported `.pt` policy |
 
 ---
 

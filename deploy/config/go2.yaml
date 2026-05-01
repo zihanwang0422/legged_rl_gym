@@ -1,6 +1,9 @@
 # ========== Paths ==========
-policy_path: "../deploy/exported_policy/go2"
-xml_path: "{LEGGED_GYM_ROOT_DIR}/resources/robots/go2/scene.xml"
+policy_path: "../exported_policy/go2/policy_1.pt"
+# motor 版本（纯力矩，需 Python 端计算 PD）
+# xml_path: "../assets/go2/scene.xml"
+# position servo 版本（MuJoCo 内部完成 PD，kp=25 kv=0.5 已写入 XML）
+xml_path: "../assets/go2/scene_pos.xml"
 
 # ========== Time parameters ==========
 simulation_duration: 60.0
@@ -9,16 +12,18 @@ policy_hz: 33          # policy inference frequency (Hz)
 control_decimation: 6  # sim_dt * control_decimation = policy_dt (0.03s)
 
 # ========== PD gains ==========
+# Match training: stiffness=25, damping=0.5
 kp_stand: 60.0
 kd_stand: 2.0
-kp_walk: 60.0
-kd_walk: 1.0
+kp_walk: 45.0
+kd_walk: 0.5
 
 # ========== Default standing angles (training order: FL, FR, RL, RR) ==========
-default_dof_pos: [0.0, 0.9, -1.8,   # FL (hip, thigh, calf)
-                  0.0, 0.9, -1.8,   # FR
-                  0.0, 0.9, -1.8,   # RL
-                  0.0, 0.9, -1.8]   # RR
+# Match training: FL/RL hip=+0.1, FR/RR hip=-0.1, thigh=0.9, calf=-1.5
+default_dof_pos: [ 0.1,  0.9, -1.5,   # FL (hip, thigh, calf)
+                  -0.1,  0.9, -1.5,   # FR
+                   0.1,  0.9, -1.5,   # RL
+                  -0.1,  0.9, -1.5]   # RR
 
 # ========== Observation scales ==========
 obs_scales:
@@ -59,3 +64,17 @@ sdk_joint_order: ['FR_0', 'FR_1', 'FR_2',
 # Joint mapping: train order (FL, FR, RL, RR) -> SDK order (FR, FL, RR, RL)
 train_to_sdk_map: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
 sdk_to_train_map: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+
+# ========== Observation / action clipping ==========
+clip_observations: 100.0
+clip_actions: 100.0
+
+# ========== Joint limits (training order: FL, FR, RL, RR) ==========
+joint_limit_low:  [-0.863, -0.686, -2.818,
+                   -0.863, -0.686, -2.818,
+                   -0.863, -0.686, -2.818,
+                   -0.863, -0.686, -2.818]
+joint_limit_high: [ 0.863,  4.501, -0.888,
+                    0.863,  4.501, -0.888,
+                    0.863,  4.501, -0.888,
+                    0.863,  4.501, -0.888]
