@@ -59,3 +59,5 @@ runs
 __pycache__
 
 .history
+# Local history (VS Code)
+.history/
