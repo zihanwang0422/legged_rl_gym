@@ -5,6 +5,10 @@ Trains natural locomotion policies for quadruped robots using ~4.5 seconds of re
 
 > **中文文档**: [README_CN.md](README_CN.md)
 
+| Retargeting | Sim-to-Sim |
+|:-----------:|:----------:|
+| ![Retargeting](media/go2_retargeting.gif) | ![Sim-to-Sim](media/go2_sim2sim.gif) |
+
 ---
 ## Installation
 
