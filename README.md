@@ -7,7 +7,7 @@ Trains natural locomotion policies for quadruped robots using ~4.5 seconds of re
 
 | Retargeting | Sim-to-Sim |
 |:-----------:|:----------:|
-| ![Retargeting](media/go2_retargeting.gif) | ![Sim-to-Sim](media/go2_sim2sim.gif) |
+| <img src="media/go2_retargeting.gif" width="320"/> | <img src="media/go2_sim2sim.gif" width="480"/> |
 
 ---
 ## Installation
